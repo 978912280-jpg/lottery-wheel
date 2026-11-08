@@ -128,6 +128,22 @@ h3{margin:8px 0}
 #exitDebugBtn{
   margin:8px 0;padding:8px 12px;background:#c0392b;color:white;border:none;border-radius:6px;
 }
+/* 权重持久化工具区 */
+.weight-tools{
+  display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 4px;
+}
+.weight-tools button{
+  padding:7px 10px;font-size:14px;border:none;border-radius:6px;cursor:pointer;color:#fff;background:#4a6fa5;
+}
+#restoreLibBtn{background:#7f8c8d}
+#exportCfgBtn{background:#8e44ad}
+#importCfgBtn{background:#8e44ad}
+#copyCfgBtn{background:#16a085}
+.weight-status{
+  font-size:13px;color:#555;line-height:1.7;padding:6px 0;
+  border-top:1px dashed #d9a7a7;
+}
+.weight-status b{color:#8b2222}
 .expect-box{
   padding:8px 0;
   font-weight:bold;
@@ -202,7 +218,17 @@ h3{margin:8px 0}
     <input type="number" id="w100" min="0">
   </div>
   <button id="saveWeightBtn">保存权重并更新转盘</button>
-  <button id="exitDebugBtn">退出调试模式</button>
+
+  <div class="weight-tools">
+    <button id="restoreLibBtn">恢复库中配置</button>
+    <button id="exportCfgBtn">导出 config.json</button>
+    <button id="importCfgBtn">导入 config.json</button>
+    <button id="copyCfgBtn">复制配置 JSON</button>
+    <button id="exitDebugBtn">退出调试模式</button>
+  </div>
+  <input type="file" id="importCfgInput" accept=".json,application/json" style="display:none">
+
+  <div class="weight-status" id="weightStatus">权重来源：--</div>
 
   <!--单次抽奖数学期望-->
   <div class="expect-box" id="expectBox">单次抽奖数学期望：--</div>
@@ -256,20 +282,105 @@ const w10 = document.getElementById('w10');
 const w20 = document.getElementById('w20');
 const w50 = document.getElementById('w50');
 const w100 = document.getElementById('w100');
+const weightStatus = document.getElementById('weightStatus');
+const restoreLibBtn = document.getElementById('restoreLibBtn');
+const exportCfgBtn = document.getElementById('exportCfgBtn');
+const importCfgBtn = document.getElementById('importCfgBtn');
+const importCfgInput = document.getElementById('importCfgInput');
+const copyCfgBtn = document.getElementById('copyCfgBtn');
 const DEBUG_PASSWORD = "990723";
 let isDebugMode = false;
 
 //奖项配置 默认权重：5积分80，10积分15，20积分6，50积分2，100积分0.8
-let items = [
-    {name:"5积分", weight:20},
-    {name:"20积分", weight:6},
-    {name:"5积分", weight:20},
-    {name:"10积分", weight:15},
-    {name:"5积分", weight:20},
-    {name:"50积分", weight:2},
-    {name:"5积分", weight:20},
-    {name:"100积分", weight:0.8},
-];
+//权重持久化：本浏览器已保存的权重 > 仓库根目录 config.json > 这里的内置默认
+const STORAGE_KEY = "lotteryWheel.weights.v1";
+const DEFAULT_WEIGHTS = {w5:80, w10:15, w20:6, w50:2, w100:0.8};
+const WEIGHT_KEYS = ["w5","w10","w20","w50","w100"];
+let libWeights = null;          // 从 config.json 读到的权重
+let weightsSource = "内置默认";
+
+function isValidWeights(w){
+    if(!w || typeof w !== "object") return false;
+    let sum = 0;
+    for(const k of WEIGHT_KEYS){
+        const v = Number(w[k]);
+        if(!isFinite(v) || v < 0) return false;
+        sum += v;
+    }
+    return sum > 0;
+}
+function normalizeWeights(w){
+    const out = {};
+    WEIGHT_KEYS.forEach(k=>{ out[k] = Number(w[k]); });
+    return out;
+}
+//保持原来8个扇区结构，同一奖项的权重平均拆到它的每个扇区
+function buildItems(w){
+    return [
+        {name:"5积分", weight:Number(w.w5)/4},
+        {name:"20积分", weight:Number(w.w20)},
+        {name:"5积分", weight:Number(w.w5)/4},
+        {name:"10积分", weight:Number(w.w10)},
+        {name:"5积分", weight:Number(w.w5)/4},
+        {name:"50积分", weight:Number(w.w50)},
+        {name:"5积分", weight:Number(w.w5)/4},
+        {name:"100积分", weight:Number(w.w100)},
+    ];
+}
+//把 items 再汇总回五档权重
+function readWeightsFromItems(){
+    const w = {w5:0,w10:0,w20:0,w50:0,w100:0};
+    items.forEach(it=>{
+        if(it.name==="5积分") w.w5 += it.weight;
+        if(it.name==="10积分") w.w10 += it.weight;
+        if(it.name==="20积分") w.w20 += it.weight;
+        if(it.name==="50积分") w.w50 += it.weight;
+        if(it.name==="100积分") w.w100 += it.weight;
+    });
+    return w;
+}
+function loadLocalWeights(){
+    try{
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if(!raw) return null;
+        const w = JSON.parse(raw);
+        return isValidWeights(w) ? normalizeWeights(w) : null;
+    }catch(e){ return null; }
+}
+function saveLocalWeights(w){
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(w)); return true; }
+    catch(e){ return false; }
+}
+function clearLocalWeights(){
+    try{ localStorage.removeItem(STORAGE_KEY); }catch(e){}
+}
+//读取仓库根目录的 config.json（用 file:// 直接打开时会失败，属正常）
+async function fetchLibWeights(){
+    try{
+        const res = await fetch("./config.json?_=" + Date.now(), {cache:"no-store"});
+        if(!res.ok) return null;
+        const data = await res.json();
+        const w = (data && data.weights) ? data.weights : data;
+        return isValidWeights(w) ? normalizeWeights(w) : null;
+    }catch(e){ return null; }
+}
+function applyWeights(w, source){
+    items = buildItems(w);
+    weightsSource = source;
+    drawWheel();
+    refreshExpectUi();
+    renderWeightStatus();
+}
+function renderWeightStatus(){
+    if(!weightStatus) return;
+    const w = readWeightsFromItems();
+    const total = WEIGHT_KEYS.reduce((s,k)=>s+Number(w[k]), 0);
+    weightStatus.innerHTML = `权重来源：<b>${weightsSource}</b><br>`
+      + `5积分 ${w.w5} ｜ 10积分 ${w.w10} ｜ 20积分 ${w.w20} ｜ 50积分 ${w.w50} ｜ 100积分 ${w.w100}`
+      + `（合计 ${Number(total.toFixed(4))}）`;
+}
+
+let items = buildItems(DEFAULT_WEIGHTS);
 
 function getColorByName(name){
     if(name === "5积分") return "#a9d8f5";
@@ -557,13 +668,14 @@ enterDebugBtn.onclick = function(){
         debugPanel.style.display = "block";
         fillDebugWeightInput();
         refreshExpectUi();
+        renderWeightStatus();
         debugPwdInput.value = "";
     }else{
         alert("密码错误");
     }
 }
 
-//保存权重
+//保存权重（同时写入本浏览器本地存储，下次打开自动生效）
 saveWeightBtn.onclick = function(){
     const v5 = Number(w5.value)||0;
     const v10 = Number(w10.value)||0;
@@ -574,20 +686,101 @@ saveWeightBtn.onclick = function(){
         alert("权重总和不能为0");
         return;
     }
+    if([v5,v10,v20,v50,v100].some(v=>v<0)){
+        alert("权重不能为负数");
+        return;
+    }
+    const w = {w5:v5, w10:v10, w20:v20, w50:v50, w100:v100};
     //重建items数组，保持原来8个扇区结构，同奖项合并权重再拆分
-    items = [
-        {name:"5积分", weight:v5/4},
-        {name:"20积分", weight:v20},
-        {name:"5积分", weight:v5/4},
-        {name:"10积分", weight:v10},
-        {name:"5积分", weight:v5/4},
-        {name:"50积分", weight:v50},
-        {name:"5积分", weight:v5/4},
-        {name:"100积分", weight:v100},
-    ];
+    items = buildItems(w);
     drawWheel();
     refreshExpectUi();
-    alert("权重已保存，转盘已更新");
+    const ok = saveLocalWeights(w);
+    weightsSource = ok ? "本浏览器已保存" : "仅本次生效（本地存储不可用）";
+    renderWeightStatus();
+    alert(ok
+        ? "权重已保存，下次打开本网页会自动生效。\n如需在其他设备/清理缓存后也生效，请点“导出 config.json”并提交到仓库。"
+        : "浏览器本地存储不可用（可能处于隐私模式），权重仅本次生效。");
+}
+
+//恢复为仓库 config.json 中的权重（同时清除本浏览器保存的权重）
+restoreLibBtn.onclick = async function(){
+    clearLocalWeights();
+    const w = await fetchLibWeights();
+    if(w){
+        libWeights = w;
+        applyWeights(w, "仓库 config.json");
+        alert("已恢复为仓库 config.json 中的权重");
+    }else{
+        applyWeights(DEFAULT_WEIGHTS, "内置默认");
+        alert("未能读取仓库中的 config.json（用 file:// 直接打开网页时读不到属正常现象），已恢复内置默认权重");
+    }
+    fillDebugWeightInput();
+}
+
+//导出 config.json：放到仓库根目录即可成为所有设备的默认权重
+exportCfgBtn.onclick = function(){
+    const w = readWeightsFromItems();
+    const payload = {
+        "$comment": "抽奖转盘权重配置：改完提交到仓库根目录 config.json，网页下次打开即以此为默认权重",
+        "updatedAt": new Date().toISOString(),
+        "weights": normalizeWeights(w)
+    };
+    const txt = JSON.stringify(payload, null, 2);
+    const blob = new Blob([txt], {type:"application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "config.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
+
+//导入 config.json（文件名随意，内容需含五档权重）
+importCfgBtn.onclick = function(){
+    importCfgInput.value = "";
+    importCfgInput.click();
+}
+importCfgInput.onchange = function(){
+    const file = importCfgInput.files && importCfgInput.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = function(){
+        try{
+            const data = JSON.parse(String(reader.result));
+            const w = (data && data.weights) ? data.weights : data;
+            if(!isValidWeights(w)){
+                alert("配置文件格式不正确：需要包含 w5 / w10 / w20 / w50 / w100 五档非负权重");
+                return;
+            }
+            const ww = normalizeWeights(w);
+            items = buildItems(ww);
+            drawWheel();
+            refreshExpectUi();
+            saveLocalWeights(ww);
+            weightsSource = "导入的配置文件";
+            renderWeightStatus();
+            fillDebugWeightInput();
+            alert("配置已导入并保存到本浏览器，下次打开自动生效");
+        }catch(e){
+            alert("读取失败：不是合法的 JSON 文件");
+        }
+    };
+    reader.readAsText(file);
+}
+
+//复制当前权重 JSON，方便直接粘贴到 GitHub 上的 config.json
+copyCfgBtn.onclick = function(){
+    const w = readWeightsFromItems();
+    const txt = JSON.stringify({"weights": normalizeWeights(w)}, null, 2);
+    const done = ()=>alert("当前权重 JSON 已复制，可直接粘贴到仓库 config.json 的 weights 字段");
+    if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(txt).then(done).catch(()=>prompt("请手动复制以下内容：", txt));
+    }else{
+        prompt("请手动复制以下内容：", txt);
+    }
 }
 
 exitDebugBtn.onclick = function(){
@@ -608,6 +801,21 @@ window.addEventListener('resize',()=>{
 drawWheel();
 refreshRecordUI();
 refreshRemain();
+renderWeightStatus();
+
+//启动时自动恢复权重：本浏览器已保存的 > 仓库 config.json > 内置默认
+(async function initWeights(){
+    const local = loadLocalWeights();
+    if(local){
+        applyWeights(local, "本浏览器已保存");
+        return;
+    }
+    const w = await fetchLibWeights();
+    if(w){
+        libWeights = w;
+        applyWeights(w, "仓库 config.json");
+    }
+})();
 </script>
 </body>
 </html>
