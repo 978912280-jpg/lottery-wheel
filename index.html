@@ -144,6 +144,19 @@ h3{margin:8px 0}
   border-top:1px dashed #d9a7a7;
 }
 .weight-status b{color:#8b2222}
+/* 自动同步到仓库 */
+.sync-box{
+  margin:10px 0 4px;padding:10px;border:1px dashed #8b2222;border-radius:8px;background:#fffafa;
+}
+.sync-title{font-size:14px;font-weight:bold;color:#8b2222;margin-bottom:6px;}
+.sync-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap;}
+#ghTokenInput{flex:1;min-width:160px;padding:7px;font-size:13px;}
+.sync-row button{padding:7px 10px;font-size:13px;border:none;border-radius:6px;cursor:pointer;color:#fff;background:#24292f;}
+#ghClearBtn{background:#95a5a6;}
+.sync-toggle{font-size:13px;display:flex;align-items:center;gap:6px;color:#333;}
+.sync-status{font-size:12px;color:#555;line-height:1.6;word-break:break-all;}
+.sync-status.ok{color:#1e8449;}
+.sync-status.err{color:#c0392b;}
 .expect-box{
   padding:8px 0;
   font-weight:bold;
@@ -228,6 +241,19 @@ h3{margin:8px 0}
   </div>
   <input type="file" id="importCfgInput" accept=".json,application/json" style="display:none">
 
+  <div class="sync-box">
+    <div class="sync-title">自动同步到 GitHub 仓库</div>
+    <div class="sync-row">
+      <input id="ghTokenInput" type="password" placeholder="粘贴 GitHub Token（只存本机，不会进代码）" autocomplete="off">
+      <button id="ghConnectBtn">连接</button>
+    </div>
+    <div class="sync-row">
+      <label class="sync-toggle"><input type="checkbox" id="autoSyncChk"> 保存权重时自动提交到仓库</label>
+      <button id="ghClearBtn">清除 Token</button>
+    </div>
+    <div class="sync-status" id="syncStatus">状态：未连接</div>
+  </div>
+
   <div class="weight-status" id="weightStatus">权重来源：--</div>
 
   <!--单次抽奖数学期望-->
@@ -288,6 +314,11 @@ const exportCfgBtn = document.getElementById('exportCfgBtn');
 const importCfgBtn = document.getElementById('importCfgBtn');
 const importCfgInput = document.getElementById('importCfgInput');
 const copyCfgBtn = document.getElementById('copyCfgBtn');
+const ghTokenInput = document.getElementById('ghTokenInput');
+const ghConnectBtn = document.getElementById('ghConnectBtn');
+const autoSyncChk = document.getElementById('autoSyncChk');
+const ghClearBtn = document.getElementById('ghClearBtn');
+const syncStatus = document.getElementById('syncStatus');
 const DEBUG_PASSWORD = "990723";
 let isDebugMode = false;
 
@@ -364,6 +395,100 @@ async function fetchLibWeights(){
         return isValidWeights(w) ? normalizeWeights(w) : null;
     }catch(e){ return null; }
 }
+// ========== 权重自动同步到 GitHub 仓库（Token 只存本机，绝不写入代码） ==========
+const GH_OWNER = "978912280-jpg";
+const GH_REPO = "lottery-wheel";
+const GH_BRANCH = "main";
+const GH_CONFIG_PATH = "config.json";
+const GH_TOKEN_KEY = "lotteryWheel.ghToken.v1";
+const GH_AUTOSYNC_KEY = "lotteryWheel.autoSync.v1";
+
+function getGhToken(){
+    try{ return localStorage.getItem(GH_TOKEN_KEY) || ""; }catch(e){ return ""; }
+}
+function setGhToken(t){
+    try{
+        if(t) localStorage.setItem(GH_TOKEN_KEY, t);
+        else localStorage.removeItem(GH_TOKEN_KEY);
+        return true;
+    }catch(e){ return false; }
+}
+function isAutoSync(){
+    try{ return localStorage.getItem(GH_AUTOSYNC_KEY) === "1"; }catch(e){ return false; }
+}
+function setAutoSync(on){
+    try{ localStorage.setItem(GH_AUTOSYNC_KEY, on ? "1" : "0"); }catch(e){}
+}
+function renderSyncStatus(html, kind){
+    if(!syncStatus) return;
+    syncStatus.className = "sync-status" + (kind ? " " + kind : "");
+    if(html){ syncStatus.innerHTML = html; return; }
+    const hasToken = !!getGhToken();
+    syncStatus.innerHTML = hasToken
+        ? `状态：<b style="color:#1e8449">已连接</b> ｜ 自动提交：<b>${isAutoSync() ? "开" : "关"}</b><br>目标：${GH_OWNER}/${GH_REPO} · ${GH_CONFIG_PATH}`
+        : `状态：未连接 — 填入 Token 点「连接」后，保存权重会自动提交到仓库`;
+}
+// UTF-8 安全的 base64
+function b64EncodeUnicode(str){
+    return btoa(unescape(encodeURIComponent(str)));
+}
+function ghHeaders(token){
+    return {
+        "Authorization": "token " + token,
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json"
+    };
+}
+async function verifyGhToken(token){
+    const uRes = await fetch("https://api.github.com/user", {headers: ghHeaders(token)});
+    if(!uRes.ok) throw new Error("Token 无效或无权限（HTTP " + uRes.status + "）");
+    const user = await uRes.json();
+    const rRes = await fetch(`https://api.github.com/repos/${GH_OWNER}/${GH_REPO}`, {headers: ghHeaders(token)});
+    if(!rRes.ok) throw new Error("读不到仓库 " + GH_OWNER + "/" + GH_REPO + "（HTTP " + rRes.status + "）");
+    const repo = await rRes.json();
+    const perm = repo.permissions || {};
+    if(!(perm.push || perm.admin || perm.maintain)){
+        throw new Error("该 Token 对仓库没有写权限");
+    }
+    return {login: user.login, repo: repo.full_name};
+}
+// 把权重直接写入仓库的 config.json
+async function commitWeightsToRepo(weights){
+    const token = getGhToken();
+    if(!token) throw new Error("尚未连接 GitHub");
+    const api = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_CONFIG_PATH}`;
+    let sha = null;
+    const getRes = await fetch(api + "?ref=" + GH_BRANCH + "&_=" + Date.now(), {
+        headers: ghHeaders(token), cache: "no-store"
+    });
+    if(getRes.ok){
+        const data = await getRes.json();
+        sha = data.sha;
+    }else if(getRes.status !== 404){
+        throw new Error("读取仓库 " + GH_CONFIG_PATH + " 失败（HTTP " + getRes.status + "）");
+    }
+    const stamp = new Date().toLocaleString("zh-CN", {hour12: false});
+    const payload = {
+        "$comment": "抽奖转盘权重配置：由网页调试模式自动提交，也可手动编辑；网页通过 http(s) 打开时作为默认权重",
+        "updatedAt": new Date().toISOString(),
+        "weights": normalizeWeights(weights)
+    };
+    const body = {
+        message: `chore: 更新转盘权重 ${stamp}`,
+        content: b64EncodeUnicode(JSON.stringify(payload, null, 2)),
+        branch: GH_BRANCH
+    };
+    if(sha) body.sha = sha;
+    const putRes = await fetch(api, {method: "PUT", headers: ghHeaders(token), body: JSON.stringify(body)});
+    if(!putRes.ok){
+        let msg = "HTTP " + putRes.status;
+        try{ const e = await putRes.json(); if(e && e.message) msg = e.message; }catch(_){}
+        throw new Error("提交失败：" + msg);
+    }
+    const out = await putRes.json();
+    return (out && out.commit && out.commit.sha) ? out.commit.sha : "ok";
+}
+
 function applyWeights(w, source){
     items = buildItems(w);
     weightsSource = source;
@@ -669,14 +794,15 @@ enterDebugBtn.onclick = function(){
         fillDebugWeightInput();
         refreshExpectUi();
         renderWeightStatus();
+        renderSyncStatus();
         debugPwdInput.value = "";
     }else{
         alert("密码错误");
     }
 }
 
-//保存权重（同时写入本浏览器本地存储，下次打开自动生效）
-saveWeightBtn.onclick = function(){
+//保存权重（写入本机存储；已连接 GitHub 且开启自动提交时，同时提交到仓库 config.json）
+saveWeightBtn.onclick = async function(){
     const v5 = Number(w5.value)||0;
     const v10 = Number(w10.value)||0;
     const v20 = Number(w20.value)||0;
@@ -698,9 +824,59 @@ saveWeightBtn.onclick = function(){
     const ok = saveLocalWeights(w);
     weightsSource = ok ? "本浏览器已保存" : "仅本次生效（本地存储不可用）";
     renderWeightStatus();
+
+    // —— 自动同步到仓库 ——
+    if(isAutoSync() && getGhToken()){
+        saveWeightBtn.disabled = true;
+        renderSyncStatus("状态：正在提交到仓库…");
+        try{
+            const sha = await commitWeightsToRepo(w);
+            weightsSource = "已保存并提交到仓库";
+            renderWeightStatus();
+            renderSyncStatus(`状态：<b>已提交</b>（${String(sha).slice(0,7)}），GitHub Pages 约 1 分钟后生效`, "ok");
+            alert("权重已保存，并已提交到仓库 config.json。\n线上页面约 1 分钟后自动使用新权重。");
+        }catch(e){
+            renderSyncStatus("状态：提交失败 — " + e.message + "（权重仍已保存在本机浏览器）", "err");
+            alert("权重已保存在本机，但提交仓库失败：\n" + e.message);
+        }finally{
+            saveWeightBtn.disabled = false;
+        }
+        return;
+    }
+
     alert(ok
-        ? "权重已保存，下次打开本网页会自动生效。\n如需在其他设备/清理缓存后也生效，请点“导出 config.json”并提交到仓库。"
+        ? "权重已保存，下次打开本网页会自动生效。\n如需自动同步到仓库，请在调试面板里填入 GitHub Token 并点「连接」。"
         : "浏览器本地存储不可用（可能处于隐私模式），权重仅本次生效。");
+}
+
+// —— 连接 GitHub / 自动提交开关 ——
+ghConnectBtn.onclick = async function(){
+    const token = (ghTokenInput.value || "").trim();
+    if(!token){ alert("请先粘贴 GitHub Token"); return; }
+    ghConnectBtn.disabled = true;
+    renderSyncStatus("状态：正在校验 Token…");
+    try{
+        const info = await verifyGhToken(token);
+        setGhToken(token);
+        setAutoSync(true);
+        autoSyncChk.checked = true;
+        ghTokenInput.value = "";
+        renderSyncStatus(`状态：<b>已连接</b>（${info.login}）｜ 自动提交：<b>开</b><br>保存权重时将自动提交到 ${info.repo} 的 ${GH_CONFIG_PATH}`, "ok");
+    }catch(e){
+        renderSyncStatus("状态：连接失败 — " + e.message + "<br>提示：Token 需具备 repo 写权限；建议用 Fine-grained Token，只授权本仓库 Contents: Read and write", "err");
+    }finally{
+        ghConnectBtn.disabled = false;
+    }
+}
+autoSyncChk.onchange = function(){
+    setAutoSync(autoSyncChk.checked);
+    renderSyncStatus();
+}
+ghClearBtn.onclick = function(){
+    setGhToken("");
+    setAutoSync(false);
+    autoSyncChk.checked = false;
+    renderSyncStatus("状态：Token 已清除，保存时不再提交到仓库", "ok");
 }
 
 //恢复为仓库 config.json 中的权重（同时清除本浏览器保存的权重）
@@ -802,6 +978,8 @@ drawWheel();
 refreshRecordUI();
 refreshRemain();
 renderWeightStatus();
+autoSyncChk.checked = isAutoSync();
+renderSyncStatus();
 
 //启动时自动恢复权重：本浏览器已保存的 > 仓库 config.json > 内置默认
 (async function initWeights(){

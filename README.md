@@ -33,10 +33,28 @@
 
 > 注意：`localStorage` 按浏览器 + 域名（或本地文件路径）隔离，换浏览器、清理站点数据、换设备都会丢失。
 
-### 写入仓库，让所有设备都生效
+### 自动同步到仓库（推荐，无需导入导出）
+
+在调试面板的「自动同步到 GitHub 仓库」区块：
+
+1. 粘贴一个 GitHub Token，点「连接」——只需一次；
+2. 连接成功后「保存权重时自动提交到仓库」会自动打勾；
+3. 之后每次点「保存权重并更新转盘」，会同时：写本机存储 → 自动 commit 到仓库根目录的 `config.json`，状态栏会显示提交结果的 commit 短哈希；
+4. GitHub Pages 约 1 分钟后自动用上新权重，手机/其他设备打开即是新概率。
+
+Token 说明：
+
+- **只存在你本机的浏览器 localStorage 里，不会写进代码、不会进仓库**（源码中不含任何明文 Token）；
+- 页面通过 GitHub API 的 Contents 接口提交，会自动带上文件 `sha`，不会因并发覆盖报错；
+- 换浏览器/换设备需要重新粘贴一次 Token；
+- 建议用 **Fine-grained Token**，权限只勾选 `Contents: Read and write`，仓库范围只选 `lottery-wheel`，到期自动失效；
+- 公用电脑用完点「清除 Token」；
+- 提交失败时（Token 过期、网络问题、内容冲突），权重仍会保存在本机，状态栏会显示失败原因。
+
+### 手动方式（Token 不便时）
 
 1. 调试模式下点「导出 config.json」，得到当前权重的配置文件；
-2. 打开 GitHub 仓库，把该文件上传/粘贴覆盖根目录的 `config.json`（或直接点「复制配置 JSON」，Web 端编辑 `config.json` 的 `weights` 字段）；
+2. 打开 GitHub 仓库，把该文件上传/粘贴覆盖根目录的 `config.json`（或点「复制配置 JSON」，在 Web 端直接编辑 `config.json` 的 `weights` 字段）；
 3. 提交后，网页（通过 http/https 打开，例如 GitHub Pages）下次打开就会加载新的默认权重。
 
 > 说明：`config.json` 通过 `fetch` 读取，因此用 `file://` 双击打开网页时读不到（浏览器安全限制），此时只有 `localStorage` 生效；用 http(s) 打开（GitHub Pages / 本地静态服务器）才会读取仓库配置。
@@ -45,6 +63,8 @@
 
 调试面板中的相关按钮：
 
+- **保存权重并更新转盘**：写入本机存储；已连接 GitHub 且开启自动提交时，同时提交到仓库 `config.json`；
+- **连接 / 清除 Token**：连接 GitHub（校验账号与仓库写权限）或清除本机保存的 Token；
 - **恢复库中配置**：清除本浏览器保存的权重，回退到 `config.json`（读不到则回退内置默认）；
 - **导出 config.json** / **导入 config.json**：跨设备搬运权重配置；
 - **复制配置 JSON**：一键复制，便于直接粘贴到 GitHub 网页端编辑。
